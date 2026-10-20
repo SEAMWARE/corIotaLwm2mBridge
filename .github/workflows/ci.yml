@@ -1,0 +1,91 @@
+#
+# Build the bridge against the cor stack, check it still satisfies the bridge contract, and run its
+# functional tests against a broker built from the same stack.
+#
+# The job runs inside the cor stack's CI base image - the image coraine's own CI uses - and the repos
+# are SIBLINGS, as on a workstation: this one in stack/<repo>, corLibs' bootstrap.sh clones the cor
+# libs beside it, coraine is checked out beside them. The tests need no database server: the broker
+# runs on ramDB.
+#
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    #
+    # Pinned, as in coraine's ci.yml (the same tag): a red run is then a change in this repo, not in the
+    # image.
+    #
+    container:
+      image: quay.io/seamware/coraine-ci:2026-10-13-f4804c2
+
+    env:
+      SEAMWARE_PLUGIN_DIR: /opt/seamware/plugins
+
+    steps:
+      - name: Check out this bridge
+        uses: actions/checkout@v4
+        with:
+          path: stack/bridge
+
+      - name: Check out corLibs
+        uses: actions/checkout@v4
+        with:
+          repository: SEAMWARE/corLibs
+          path: stack/corLibs
+
+      - name: Check out coraine
+        uses: actions/checkout@v4
+        with:
+          repository: SEAMWARE/coraine
+          path: stack/coraine
+
+      - name: Clone and build the cor libs
+        working-directory: stack/corLibs
+        run: ./bootstrap.sh
+
+      #
+      # Seconds, and first: it names a broken contract as such, before the full build can fail on it
+      #
+      - name: Bridge contract check
+        working-directory: stack/bridge
+        run: make contract
+
+      - name: Build the bridge - release, then debug
+        working-directory: stack/bridge
+        run: |
+          make BUILD=release
+          make clean
+          make
+
+      - name: Build and install coraine
+        working-directory: stack/coraine
+        run: |
+          mkdir -p /opt/seamware/plugins /opt/seamware/etc
+          make di
+
+      - name: Functional tests
+        working-directory: stack/bridge
+        #
+        # corTest sorts JSON bodies with the corJson tool and refuses to run without it: built with corJson,
+        # not on PATH here (as in coraine's ci.yml)
+        #
+        env:
+          CORJSON: ${{ github.workspace }}/stack/corJson/bin/corJson
+        run: make test CORTEST=../corLibs/bin/corTest
+
+      - name: Keep what a failing test left
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: functests
+          path: |
+            stack/bridge/test/funcTests/cases/*.out
+            stack/bridge/test/funcTests/cases/*.diff
+            stack/bridge/test/funcTests/cases/*.stderr
+            /tmp/iotalwm2m-bridge-test/broker.log

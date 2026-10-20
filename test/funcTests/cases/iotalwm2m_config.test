@@ -1,0 +1,80 @@
+#
+# FILE            iotalwm2m_config.test
+#
+# Copyright 2026 Seamware
+# SPDX-License-Identifier: Apache-2.0
+#
+# DataChannels whose channelInfo the plugin refuses carry nothing - an observe that is no resource
+# (<object>/<instance>/<resource>), a key that is not observe - and an endpoint with a '*' that does not end it.
+# A client no DataChannel takes registers all the same, and is observed for nothing. An AssetChannel is
+# refused: dormant, with why.
+#
+# REQUIRE_FEATURE: ASSET_CHANNELS
+#
+--NAME--
+iotalwm2m - DataChannels with a channelInfo refused; a client no DataChannel has; an AssetChannel refused
+
+--TAGS--
+iotalwm2m
+
+--INIT--
+rm -rf "${LWM2M_TEST_DIR:?}"
+mkdir -p "$LWM2M_TEST_DIR"
+cat > "$LWM2M_TEST_DIR/bridges.json" <<EOF
+{
+  "iotalwm2m": {
+    "server": { "port": $LWM2M_COAP_PORT },
+    "ngsild": {
+      "defaultEntity": false,
+      "dataChannels": {
+        "objectOnly": { "channelInfo": [ { "key": "observe", "value": "3303/0" } ],
+                        "entities": [ { "type": "T", "id": "urn:ngsi-ld:T:{@deviceId}", "attributes": { "t": { "column": "3303/0/5700" } } } ] },
+        "typo":       { "channelInfo": [ { "key": "observes", "value": "3303/0/5700" } ],
+                        "entities": [ { "type": "T", "id": "urn:ngsi-ld:T:{@deviceId}", "attributes": { "t": { "column": "3303/0/5700" } } } ] },
+        "a*b":        { "entities": [ { "type": "T", "id": "urn:ngsi-ld:T:{@deviceId}", "attributes": { "t": { "column": "3303/0/5700" } } } ] }
+      },
+      "assetChannels": { "plant": { "entities": "natural" } }
+    }
+  }
+}
+EOF
+brokerStart
+
+--RUN--
+echo "01. objectOnly registers - no DataChannel took it: registered, observed for nothing, no entity"
+echo "=============================================================================================="
+clientStart objectOnly 18621 --res 3303/0/5700=1
+sleep 0.3
+clientLog objectOnly | sed 's|rd/[0-9a-f]*|rd/<id>|'
+curl -s -o /dev/null -w "%{http_code}\n" "localhost:$LWM2M_PORT/ngsi-ld/v1/entities/urn:ngsi-ld:T:objectOnly"
+echo
+echo
+
+
+echo "02. The AssetChannel - dormant, with why"
+echo "========================================"
+curl -s "localhost:$LWM2M_PORT/ngsi-ld/v1/assetChannels" | python3 -c '
+import json, sys
+for c in json.load(sys.stdin):
+    print(c["channelTarget"], c.get("status"), c.get("statusReason"))'
+echo
+echo
+
+
+--TEARDOWN--
+clientStop
+brokerStop
+
+
+--EXPECT--
+01. objectOnly registers - no DataChannel took it: registered, observed for nothing, no entity
+==============================================================================================
+REGISTERED rd/<id>
+404
+
+
+02. The AssetChannel - dormant, with why
+========================================
+plant dormant the iotalwm2m bridge carries DataChannels only - a resource's value is a record
+
+

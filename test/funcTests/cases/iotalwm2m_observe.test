@@ -1,0 +1,168 @@
+#
+# FILE            iotalwm2m_observe.test
+#
+# Copyright 2026 Seamware
+# SPDX-License-Identifier: Apache-2.0
+#
+# LwM2M clients registering with the bridge's server, their observed resources as DataChannel records:
+#
+#   *          every client - the IPSO temperature (3303/0/5700) and the battery level (3/0/9) observed;
+#              the registration's LwM2M version and lifetime as attributes
+#   boiler-1   one client, a DataChannel of its own: it takes the client before "*" does
+#
+# A notification is a record. A client registering again is observed again; one that de-registers is not
+# observed any more. A text/plain value is a number when it reads as one, else a string.
+#
+--NAME--
+iotalwm2m - LwM2M registrations and observed resources as DataChannel records
+
+--TAGS--
+iotalwm2m
+
+--INIT--
+rm -rf "${LWM2M_TEST_DIR:?}"
+mkdir -p "$LWM2M_TEST_DIR"
+cat > "$LWM2M_TEST_DIR/bridges.json" <<EOF
+{
+  "iotalwm2m": {
+    "server": { "port": $LWM2M_COAP_PORT },
+    "ngsild": {
+      "defaultEntity": false,
+      "dataChannels": {
+        "*":        { "channelInfo": [ { "key": "observe", "value": "3303/0/5700,3/0/9" } ],
+                      "entities": [ { "type": "Sensor", "id": "urn:ngsi-ld:Sensor:{@deviceId}",
+                                      "attributes": { "temperature": { "column": "3303/0/5700" },
+                                                      "battery":     { "column": "3/0/9" },
+                                                      "lwm2m":       { "column": "@lwm2m" },
+                                                      "lifetime":    { "column": "@lifetime" } } } ] },
+        "boiler-1": { "channelInfo": [ { "key": "observe", "value": "3303/0/5700, 3/0/1" } ],
+                      "entities": [ { "type": "Boiler", "id": "urn:ngsi-ld:Boiler:{@deviceId}",
+                                      "attributes": { "water": { "column": "3303/0/5700" },
+                                                      "model": { "column": "3/0/1" } } } ] }
+      }
+    }
+  }
+}
+EOF
+brokerStart
+
+--RUN--
+echo "01. sensor-1 registers - temperature 21.5 and battery 87 observed; the registration's version and lifetime"
+echo "========================================================================================================"
+clientStart sensor-1 18601 --res 3303/0/5700=21.5 --res 3/0/9=87 --res 3/0/1=TH-100
+entityAwait urn:ngsi-ld:Sensor:sensor-1 '"battery": 87'
+entityGet urn:ngsi-ld:Sensor:sensor-1 keyValues
+clientLog sensor-1 | sed 's|rd/[0-9a-f]*|rd/<id>|' | sort
+echo
+echo
+
+
+echo "02. The temperature changes on the device - its notification a record: 22.25; a battery \"low\" a string"
+echo "======================================================================================================"
+clientCtl sensor-1 'set?path=3303/0/5700&value=22.25'
+entityAwait urn:ngsi-ld:Sensor:sensor-1 '"temperature": 22.25'
+clientCtl sensor-1 'set?path=3/0/9&value=low'
+entityAwait urn:ngsi-ld:Sensor:sensor-1 '"battery": "low"'
+entityGet urn:ngsi-ld:Sensor:sensor-1 keyValues
+echo
+echo
+
+
+echo "03. boiler-1 - its own DataChannel; the model a string"
+echo "======================================================"
+clientStart boiler-1 18602 --res 3303/0/5700=64 --res 3/0/1=Vulcan-9
+entityAwait urn:ngsi-ld:Boiler:boiler-1 '"model"'
+entityGet urn:ngsi-ld:Boiler:boiler-1 keyValues
+curl -s -o /dev/null -w "Sensor boiler-1: %{http_code}\n" "localhost:$LWM2M_PORT/ngsi-ld/v1/entities/urn:ngsi-ld:Sensor:boiler-1"
+echo
+echo
+
+
+echo "04. sensor-1 registers again - observed again; an update of its registration observes nothing new"
+echo "================================================================================================="
+: > "$LWM2M_TEST_DIR/sensor-1.log"
+clientCtl sensor-1 register
+clientAwait sensor-1 'OBSERVE 3303/0/5700'
+clientAwait sensor-1 'OBSERVE 3/0/9'
+clientCtl sensor-1 update
+clientCtl sensor-1 'set?path=3303/0/5700&value=23'
+entityAwait urn:ngsi-ld:Sensor:sensor-1 '"temperature": 23'
+clientLog sensor-1 | sed 's|rd/[0-9a-f]*|rd/<id>|' | sort
+echo
+echo
+
+
+echo "05. sensor-1 de-registers - a notification it still sends is no record (the server resets it)"
+echo "============================================================================================="
+clientCtl sensor-1 deregister
+clientCtl sensor-1 'set?path=3303/0/5700&value=99'
+sleep 0.5
+curl -s "localhost:$LWM2M_PORT/ngsi-ld/v1/entities/urn:ngsi-ld:Sensor:sensor-1?options=keyValues&attrs=temperature"
+echo
+echo
+echo
+
+
+--TEARDOWN--
+clientStop
+brokerStop
+
+
+--EXPECT--
+01. sensor-1 registers - temperature 21.5 and battery 87 observed; the registration's version and lifetime
+========================================================================================================
+{
+  "battery": 87,
+  "id": "urn:ngsi-ld:Sensor:sensor-1",
+  "lifetime": 60,
+  "lwm2m": "1.1",
+  "temperature": 21.5,
+  "type": "Sensor"
+}
+OBSERVE 3/0/9
+OBSERVE 3303/0/5700
+REGISTERED rd/<id>
+
+
+02. The temperature changes on the device - its notification a record: 22.25; a battery "low" a string
+======================================================================================================
+{
+  "battery": "low",
+  "id": "urn:ngsi-ld:Sensor:sensor-1",
+  "lifetime": 60,
+  "lwm2m": "1.1",
+  "temperature": 22.25,
+  "type": "Sensor"
+}
+
+
+03. boiler-1 - its own DataChannel; the model a string
+======================================================
+{
+  "id": "urn:ngsi-ld:Boiler:boiler-1",
+  "model": "Vulcan-9",
+  "type": "Boiler",
+  "water": 64
+}
+Sensor boiler-1: 404
+
+
+04. sensor-1 registers again - observed again; an update of its registration observes nothing new
+=================================================================================================
+sensor-1: OBSERVE 3303/0/5700
+sensor-1: OBSERVE 3/0/9
+OBSERVE 3/0/9
+OBSERVE 3303/0/5700
+REGISTERED rd/<id>
+
+
+05. sensor-1 de-registers - a notification it still sends is no record (the server resets it)
+=============================================================================================
+{
+  "id": "urn:ngsi-ld:Sensor:sensor-1",
+  "type": "Sensor",
+  "temperature": 23
+}
+
+
+
