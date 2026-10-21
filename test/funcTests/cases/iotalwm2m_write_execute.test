@@ -1,0 +1,202 @@
+#
+# FILE            iotalwm2m_write_execute.test
+#
+# Copyright 2026 Seamware
+# SPDX-License-Identifier: Apache-2.0
+#
+# A lamp - the IPSO Light Control object (3311) - and the Device object's resources:
+#
+#   Writes      channelDirection both: a client's write to a mapped attribute is a Write (PUT, text/plain) of the
+#               resource - a boolean 1 or 0. A Write the device refuses (a read-only resource: 4.05) was
+#               stored: the resource is read back, and the entity shows what the device has.
+#   Executes    a Service Registration whose endpoint is lwm2m://<endpoint name>/<object>/<instance>/<resource>
+#               is executed by the bridge: an Execute (POST), the input's "arguments" its payload. The
+#               device's 2.04 completes it; any other answer fails it - 502, the ProblemDetails saying why.
+#
+# A write to a device that is not registered is refused (503); so is an Execute (the broker's error).
+#
+# REQUIRE_FEATURE: CHANNEL_WRITE_BACK
+# REQUIRE_FEATURE: SERVICE_EXECUTION
+#
+--NAME--
+iotalwm2m - written attributes as LwM2M Writes, Service Executions as Executes
+
+--TAGS--
+iotalwm2m
+
+--INIT--
+rm -rf "${LWM2M_TEST_DIR:?}"
+mkdir -p "$LWM2M_TEST_DIR"
+cat > "$LWM2M_TEST_DIR/bridges.json" <<EOF
+{
+  "iotalwm2m": {
+    "server": { "port": $LWM2M_COAP_PORT },
+    "ngsild": {
+      "defaultEntity": false,
+      "dataChannels": {
+        "lamp-*": { "channelDirection": "both", "idEncoding": "percent",
+                    "channelInfo": [ { "key": "observe", "value": "3311/0/5850,3311/0/5851,3/0/1" } ],
+                    "entities": [ { "type": "Lamp", "id": "urn:ngsi-ld:Lamp:{@deviceId}",
+                                    "attributes": { "on":     { "column": "3311/0/5850", "as": "boolean" },
+                                                    "dimmer": { "column": "3311/0/5851" },
+                                                    "model":  { "column": "3/0/1" } } } ] }
+      }
+    }
+  }
+}
+EOF
+brokerStart
+clientStart lamp-1 18611 --res 3311/0/5850=0 --res 3311/0/5851=10 --res 3/0/1=Lumen-3 --readonly 3/0/1 --fail-execute 3/0/5
+
+--RUN--
+B="http://localhost:$LWM2M_PORT/ngsi-ld/v1"
+L=urn:ngsi-ld:Lamp:lamp-1
+
+reg() {  # reg <serviceName> <endpoint> - the HTTP status
+  curl -s -o /dev/null -w "register $1: %{http_code}\n" "$B/serviceRegistrations" -H 'Content-Type: application/json' \
+       -d "{\"type\":\"ServiceRegistration\",\"endpoint\":\"$2\",\"entities\":[{\"id\":\"$L\",\"type\":\"Lamp\"}],\"serviceInformation\":{\"serviceName\":\"$1\"}}"
+}
+invoke() {  # invoke <serviceName> <input> - the status, then the output, or the error's detail
+  curl -s -w "\n%{http_code}\n" "$B/entities/$L/services/$1" -H 'Content-Type: application/json' -d "$2" > "$LWM2M_TEST_DIR/invoke.out"
+  tail -1 "$LWM2M_TEST_DIR/invoke.out"
+  head -n -1 "$LWM2M_TEST_DIR/invoke.out" | python3 -c '
+import json, sys
+text = sys.stdin.read().strip()
+b = json.loads(text) if text else None
+print(json.dumps(b.get("detail") if isinstance(b, dict) and "detail" in b and "status" in b else b, sort_keys=True))'
+}
+
+entityAwait $L '"model": "Lumen-3"'
+
+echo "01. PATCH dimmer 40, on true - two Writes, text/plain: 40 and 1"
+echo "==============================================================="
+attrPatch $L dimmer 40
+clientAwait lamp-1 'WRITE 3311/0/5851 40'
+attrPatch $L on true
+clientAwait lamp-1 'WRITE 3311/0/5850 1'
+entityGet $L keyValues
+echo
+echo
+
+
+echo "02. PATCH model - a read-only resource: the device's 4.05, the resource read back - the entity the device's"
+echo "=========================================================================================================="
+attrPatch $L model '"Lumen-X"'
+clientAwait lamp-1 'WRITE 3/0/1 Lumen-X'
+clientAwait lamp-1 'READ 3/0/1'
+entityAwait $L '"model": "Lumen-3"'
+entityGet $L keyValues
+echo
+echo
+
+
+echo "03. The services - Reboot (3/0/4), Factory Reset (3/0/5, which this device refuses), and a 3311 resource"
+echo "========================================================================================================"
+reg reboot  lwm2m://lamp-1/3/0/4
+reg reset   lwm2m://lamp-1/3/0/5
+reg blink   lwm2m://lamp-1/3311/0/5523
+reg ghost   lwm2m://lamp-9/3/0/4
+reg partial lwm2m://lamp-1/3/0
+echo
+echo
+
+
+echo "04. reboot - an Execute, completed; blink with arguments - its payload"
+echo "======================================================================"
+invoke reboot '{}'
+clientAwait lamp-1 'EXECUTE 3/0/4'
+invoke blink "{\"arguments\": \"0='fast',1=3\"}"
+clientAwait lamp-1 "EXECUTE 3311/0/5523 0='fast',1=3"
+echo
+echo
+
+
+echo "05. Failed - the device's 4.05 (502); an input member that is no argument, no such device, no resource in the endpoint"
+echo "======================================================================================================================"
+invoke reset '{}'
+invoke blink '{"speed": 3}'
+invoke ghost '{}'
+invoke partial '{}'
+echo
+echo
+
+
+echo "06. The lamp de-registers - a write is refused: 503"
+echo "==================================================="
+clientCtl lamp-1 deregister
+attrPatch $L dimmer 70
+echo
+echo
+
+
+--TEARDOWN--
+clientStop
+brokerStop
+
+
+--EXPECT--
+01. PATCH dimmer 40, on true - two Writes, text/plain: 40 and 1
+===============================================================
+PATCH dimmer: 204
+lamp-1: WRITE 3311/0/5851 40
+PATCH on: 204
+lamp-1: WRITE 3311/0/5850 1
+{
+  "dimmer": 40,
+  "id": "urn:ngsi-ld:Lamp:lamp-1",
+  "model": "Lumen-3",
+  "on": true,
+  "type": "Lamp"
+}
+
+
+02. PATCH model - a read-only resource: the device's 4.05, the resource read back - the entity the device's
+==========================================================================================================
+PATCH model: 204
+lamp-1: WRITE 3/0/1 Lumen-X
+lamp-1: READ 3/0/1
+{
+  "dimmer": 40,
+  "id": "urn:ngsi-ld:Lamp:lamp-1",
+  "model": "Lumen-3",
+  "on": true,
+  "type": "Lamp"
+}
+
+
+03. The services - Reboot (3/0/4), Factory Reset (3/0/5, which this device refuses), and a 3311 resource
+========================================================================================================
+register reboot: 201
+register reset: 201
+register blink: 201
+register ghost: 201
+register partial: 201
+
+
+04. reboot - an Execute, completed; blink with arguments - its payload
+======================================================================
+200
+{}
+lamp-1: EXECUTE 3/0/4
+200
+{}
+lamp-1: EXECUTE 3311/0/5523 0='fast',1=3
+
+
+05. Failed - the device's 4.05 (502); an input member that is no argument, no such device, no resource in the endpoint
+======================================================================================================================
+502
+"the device answered 4.05 to the Execute of /3/0/5"
+400
+"the service's bridge cannot use this input"
+502
+"the service's bridge refused it"
+400
+"the service's bridge cannot use this input"
+
+
+06. The lamp de-registers - a write is refused: 503
+===================================================
+PATCH dimmer: 503
+
+

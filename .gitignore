@@ -1,0 +1,15 @@
+*.o
+*.d
+*.so
+*~
+.flags
+.coraine-src/
+test/funcTests/cases/*.out
+test/funcTests/cases/*.diff
+test/funcTests/cases/*.stderr
+test/funcTests/cases/*.init
+test/funcTests/cases/*.run
+test/funcTests/cases/*.teardown
+test/funcTests/cases/*.name
+test/funcTests/cases/*.expect
+test/funcTests/cases/*.log
